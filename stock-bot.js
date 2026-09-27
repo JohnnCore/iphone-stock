@@ -160,17 +160,35 @@ async function notify(title, message, url = PAGE_URL) {
   }
 }
 
+// Estado persistido em disco (last conhecido por variante + contagem de erros seguidos).
+// Necessário porque no GitHub Actions cada execução é um processo novo, sem memória da anterior;
+// sem isto, o bot voltaria a avisar a cada corrida enquanto o stock se mantivesse disponível.
+const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, '.state.json');
+
+function loadState() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    return { last: new Map(Object.entries(raw.last ?? {})), errors: raw.errors ?? 0 };
+  } catch {
+    return { last: new Map(), errors: 0 };
+  }
+}
+
+function saveState(state) {
+  const raw = { last: Object.fromEntries(state.last), errors: state.errors };
+  fs.writeFileSync(STATE_FILE, JSON.stringify(raw, null, 2) + '\n');
+}
+
 async function main() {
   if (process.argv.includes('--test')) return notify('Teste', 'O bot de stock está a funcionar.');
   const once = process.argv.includes('--once');
-  const last = new Map(); // label -> último estado conhecido (true/false); ausente = sem leitura válida
-  let errors = 0;
+  const state = loadState();
 
   log(`A vigiar ${TARGETS.map((t) => t.label).join(', ')} a cada ${INTERVAL_MS / 1000}s...`);
   for (;;) {
     try {
       const results = await checkStock();
-      errors = 0;
+      state.errors = 0;
       for (const r of results) {
         const { label } = r.target;
         if (r.error) {
@@ -179,16 +197,17 @@ async function main() {
         }
         log(`${r.inStock ? '✅ Em stock' : '❌ Sem stock'} — ${label}${r.inStock ? ` (${r.raw})` : ''}`);
         // Alerta na transição Sem stock -> Em stock (e também se já estiver em stock no arranque).
-        if (r.inStock && last.get(label) !== true) {
+        if (r.inStock && state.last.get(label) !== true) {
           await notify(`${r.title} em stock!`, `${label} já está disponível na Vodafone.`, variantUrl(r.target));
         }
-        last.set(label, r.inStock);
+        state.last.set(label, r.inStock);
       }
     } catch (e) {
-      errors++;
-      log(`Erro (${errors}): ${e.message}`);
-      if (errors === 10) await notify('Stock bot com problemas', `10 falhas seguidas: ${e.message}`);
+      state.errors++;
+      log(`Erro (${state.errors}): ${e.message}`);
+      if (state.errors === 10) await notify('Stock bot com problemas', `10 falhas seguidas: ${e.message}`);
     }
+    saveState(state);
     if (once) return;
     await new Promise((r) => setTimeout(r, INTERVAL_MS + Math.random() * 5000)); // jitter
   }

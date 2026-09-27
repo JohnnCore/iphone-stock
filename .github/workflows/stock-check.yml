@@ -1,0 +1,40 @@
+name: Verificar stock Vodafone
+
+on:
+  schedule:
+    - cron: '*/5 * * * *' # a cada 5 minutos (mínimo prático do GitHub Actions)
+  workflow_dispatch: {} # botão "Run workflow" para testar manualmente
+
+# Precisamos de escrever de volta o ficheiro de estado (.state.json).
+permissions:
+  contents: write
+
+concurrency:
+  group: stock-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verificar stock e notificar
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
+        run: node stock-bot.js --once
+
+      - name: Guardar estado (.state.json) no repositório
+        run: |
+          git add .state.json
+          if ! git diff --cached --quiet -- .state.json; then
+            git config user.name "stock-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git commit -m "Atualizar estado do stock [skip ci]"
+            git push
+          fi
