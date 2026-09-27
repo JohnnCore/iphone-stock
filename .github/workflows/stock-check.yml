@@ -1,21 +1,33 @@
 name: Verificar stock Vodafone
 
+# Como o `schedule` do GitHub não é fiável (atrasa ou salta execuções), cada
+# execução fica em ciclo a verificar de 5 em 5 minutos durante ~5h45 e, no fim,
+# lança a execução seguinte via workflow_dispatch (cadeia contínua).
+# O `schedule` fica só como reserva, para reiniciar a cadeia se ela parar.
+# Para parar a cadeia: cancelar a execução em curso ou desativar o workflow.
 on:
   schedule:
-    - cron: '2-59/5 * * * *' # a cada 5 min, desfasado dos minutos "redondos" (menos carga no GitHub)
-  workflow_dispatch: {} # botão "Run workflow" para testar manualmente
+    - cron: '2-59/5 * * * *'
+  workflow_dispatch: {} # "Run workflow" para arrancar a cadeia
 
-# Precisamos de escrever de volta o ficheiro de estado (.state.json).
 permissions:
-  contents: write
+  contents: write # guardar .state.json no repositório
+  actions: write  # lançar a execução seguinte
 
+# Só uma execução de cada vez; no máximo uma fica pendente (as mais novas
+# substituem a pendente), por isso nunca há mais do que uma cadeia ativa.
 concurrency:
   group: stock-check
   cancel-in-progress: false
 
+env:
+  INTERVALO_SEGUNDOS: 300
+  DURACAO_MINUTOS: 345 # abaixo do limite de 360 min por job
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -23,18 +35,31 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Verificar stock e notificar
+      - name: Verificar stock em ciclo
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
-        run: node stock-bot.js --once
-
-      - name: Guardar estado (.state.json) no repositório
         run: |
-          git add .state.json
-          if ! git diff --cached --quiet -- .state.json; then
-            git config user.name "stock-bot"
-            git config user.email "actions@users.noreply.github.com"
-            git commit -m "Atualizar estado do stock [skip ci]"
-            git push
-          fi
+          git config user.name "stock-bot"
+          git config user.email "actions@users.noreply.github.com"
+          fim=$(( $(date +%s) + DURACAO_MINUTOS * 60 ))
+
+          while [ "$(date +%s)" -lt "$fim" ]; do
+            inicio=$(date +%s)
+            node stock-bot.js --once || echo "::warning::stock-bot.js falhou"
+
+            git add .state.json
+            if ! git diff --cached --quiet -- .state.json; then
+              git commit -m "Atualizar estado do stock [skip ci]"
+              git pull --rebase --autostash -q && git push -q || echo "::warning::push do estado falhou"
+            fi
+
+            espera=$(( INTERVALO_SEGUNDOS - ($(date +%s) - inicio) ))
+            [ "$espera" -gt 0 ] && sleep "$espera"
+          done
+
+      - name: Lançar a execução seguinte
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run stock-check.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
